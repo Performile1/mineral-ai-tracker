@@ -1,0 +1,156 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - mineral-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - POSTGRES_HOST=mineral-ai-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=mineral_ai_tracker
+      - POSTGRES_USER=mineral_user
+      - POSTGRES_PASSWORD=mineralpass123
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_PHI3_MODEL=phi3
+      - OLLAMA_MISTRAL_MODEL=mistral
+      - OLLAMA_LLAMA3_MODEL=llama3
+      - ENVIRONMENT=development
+      - METRICS_ENABLED=true
+    depends_on:
+      - postgres
+      - ollama
+      - redis
+    networks:
+      - mineral-net
+
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: mineral-ai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mineral_user
+      POSTGRES_PASSWORD: mineralpass123
+      POSTGRES_DB: mineral_ai_tracker
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # PRD v8.3: 00_init_schema.sql enables pgvector and creates core tables
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mineral_user -d mineral_ai_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mineral-net
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - mineral-net
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - mineral-net
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    command: celery -A backend.worker.celery_app worker --loglevel=info
+    environment:
+      - POSTGRES_HOST=mineral-ai-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=mineral_ai_tracker
+      - POSTGRES_USER=mineral_user
+      - POSTGRES_PASSWORD=mineralpass123
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_PHI3_MODEL=phi3
+      - OLLAMA_MISTRAL_MODEL=mistral
+      - OLLAMA_LLAMA3_MODEL=llama3
+      - ENVIRONMENT=development
+    depends_on:
+      - redis
+      - postgres
+      - ollama
+    networks:
+      - mineral-net
+
+  # PRD v10.0 Phase 11: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - mineral-net
+    depends_on:
+      - backend
+
+  # PRD v10.0 Phase 11: Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - mineral-net
+    depends_on:
+      - prometheus
+
+networks:
+  mineral-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  ollama_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
