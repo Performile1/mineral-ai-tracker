@@ -20,6 +20,37 @@ interface VaultStatus {
   source: "vault" | "env_var" | "none";
 }
 
+interface ChannelPrefs {
+  email: boolean;
+  in_app: boolean;
+  webhook: boolean;
+}
+
+interface NotificationPreferences {
+  dilution_risk: ChannelPrefs;
+  black_swan: ChannelPrefs;
+  take_or_pay_new: ChannelPrefs;
+  ma_radar: ChannelPrefs;
+  chokepoint: ChannelPrefs;
+  early_sentiment: ChannelPrefs;
+}
+
+interface AlertSubscription {
+  id: string;
+  ticker: string;
+  risk_threshold: number;
+  created_at: string;
+}
+
+const DEFAULT_NOTIF_PREFS: NotificationPreferences = {
+  dilution_risk:   { email: true,  in_app: true,  webhook: false },
+  black_swan:      { email: false, in_app: true,  webhook: false },
+  take_or_pay_new: { email: false, in_app: true,  webhook: false },
+  ma_radar:        { email: false, in_app: true,  webhook: false },
+  chokepoint:      { email: true,  in_app: true,  webhook: false },
+  early_sentiment: { email: false, in_app: true,  webhook: false },
+};
+
 interface LocalSettings {
   notifications: {
     email: boolean;
@@ -65,6 +96,13 @@ export default function SettingsPage() {
   const [vaultSaving, setVaultSaving] = useState(false);
   const [fmpApiKeyInput, setFmpApiKeyInput] = useState("");
   
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPreferences>(DEFAULT_NOTIF_PREFS);
+  const [notifSaving, setNotifSaving] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [subscriptions, setSubscriptions] = useState<AlertSubscription[]>([]);
+  const [subsLoading, setSubsLoading] = useState(false);
+
   const [localSettings, setLocalSettings] = useState<LocalSettings>({
     notifications: {
       email: true,
@@ -91,12 +129,91 @@ export default function SettingsPage() {
     setMounted(true);
     loadSettings();
     loadVaultStatus();
+    loadNotifPrefs();
+    loadSubscriptions();
     // Load local settings from localStorage
     const saved = localStorage.getItem("localSettings");
     if (saved) {
       setLocalSettings(JSON.parse(saved));
     }
   }, []);
+
+  const loadNotifPrefs = async () => {
+    try {
+      const res = await apiFetch("/api/settings/notifications");
+      if (!res.ok) return;
+      const data = await res.json();
+      setNotifPrefs({ ...DEFAULT_NOTIF_PREFS, ...data });
+      if (data.webhook_url) setWebhookUrl(data.webhook_url);
+    } catch (err) {
+      console.error("Failed to load notification preferences:", err);
+    }
+  };
+
+  const loadSubscriptions = async () => {
+    try {
+      setSubsLoading(true);
+      const res = await apiFetch("/api/settings/alerts/subscriptions");
+      if (!res.ok) return;
+      setSubscriptions(await res.json());
+    } catch (err) {
+      console.error("Failed to load subscriptions:", err);
+    } finally {
+      setSubsLoading(false);
+    }
+  };
+
+  const handleDeleteSubscription = async (ticker: string) => {
+    try {
+      const res = await apiFetch(`/api/settings/alerts/subscriptions/${ticker}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Failed");
+      setSubscriptions((prev) => prev.filter((s) => s.ticker !== ticker));
+    } catch (err) {
+      console.error("Failed to delete subscription:", err);
+    }
+  };
+
+  const handleSaveNotifPrefs = async () => {
+    try {
+      setNotifSaving(true);
+      setNotifError(null);
+      const payload = { ...notifPrefs, webhook_url: webhookUrl || undefined };
+      const res = await apiFetch("/api/settings/notifications", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.status === 401 || res.status === 403) {
+        setNotifError(
+          "Nekad åtkomst: Du saknar behörighet att uppdatera notifikationsinställningar (" +
+            res.status +
+            ")"
+        );
+        return;
+      }
+      if (!res.ok) throw new Error("Failed to save");
+      const data = await res.json();
+      setNotifPrefs({ ...DEFAULT_NOTIF_PREFS, ...data });
+      if (data.webhook_url !== undefined) setWebhookUrl(data.webhook_url ?? "");
+    } catch (err) {
+      console.error("Error saving notification preferences:", err);
+      setNotifError("Misslyckades med att spara notifikationsinställningar.");
+    } finally {
+      setNotifSaving(false);
+    }
+  };
+
+  const toggleNotif = (
+    category: keyof NotificationPreferences,
+    channel: keyof ChannelPrefs,
+  ) => {
+    setNotifPrefs((prev) => ({
+      ...prev,
+      [category]: { ...prev[category], [channel]: !prev[category][channel] },
+    }));
+  };
 
   const loadVaultStatus = async () => {
     try {
@@ -612,6 +729,165 @@ export default function SettingsPage() {
               />
             </div>
           </div>
+        </div>
+
+        {/* Notification Routing — Sprint 10.10 + Sprint 15 */}
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <div className="flex justify-between items-center mb-4">
+            <div>
+              <h2 className="text-xl font-semibold text-primary">Notifikationsinställningar</h2>
+              <p className="text-xs text-gray-500 mt-0.5">Styr per kategori vilka kanaler som används</p>
+            </div>
+            <button
+              onClick={handleSaveNotifPrefs}
+              disabled={notifSaving}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
+            >
+              {notifSaving ? "Sparar..." : "Spara"}
+            </button>
+          </div>
+
+          {/* Skuld J — inline error banner for 401/403 */}
+          {notifError && (
+            <div className="mb-4 flex items-start gap-2 p-3 bg-red-50 border border-red-300 text-red-700 rounded-lg text-sm">
+              <span className="mt-0.5">🚫</span>
+              <span>{notifError}</span>
+              <button
+                onClick={() => setNotifError(null)}
+                className="ml-auto text-red-400 hover:text-red-600 font-bold leading-none"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+          {/* Column headers */}
+          <div className="grid grid-cols-4 gap-2 mb-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            <div>Kategori</div>
+            <div className="text-center">E-post</div>
+            <div className="text-center">In-app</div>
+            <div className="text-center">Webhook</div>
+          </div>
+
+          {([
+            { key: "dilution_risk"   as const, label: "⚠️ Dilution Risk (>75%)",         color: "text-red-600"    },
+            { key: "black_swan"      as const, label: "🌊 Black Swan-händelse",           color: "text-purple-600" },
+            { key: "take_or_pay_new" as const, label: "🔒 Nytt Take-or-Pay-kontrakt",    color: "text-green-600"  },
+            { key: "ma_radar"        as const, label: "💰 M&A Radar (uppköpsrisk)",       color: "text-amber-600"  },
+            { key: "chokepoint"      as const, label: "🚢 Logistik / Chokepoint",         color: "text-orange-600" },
+            { key: "early_sentiment" as const, label: "📡 Tidig Sentiment-varning",      color: "text-cyan-600"   },
+          ]).map(({ key, label, color }) => (
+            <div key={key} className="grid grid-cols-4 gap-2 items-center py-2 border-b border-gray-100 last:border-0">
+              <span className={`text-sm font-medium ${color}`}>{label}</span>
+              {(["email", "in_app", "webhook"] as const).map((ch) => (
+                <div key={ch} className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => toggleNotif(key, ch)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                      notifPrefs[key][ch] ? "bg-blue-600" : "bg-gray-300"
+                    }`}
+                    aria-pressed={notifPrefs[key][ch]}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                        notifPrefs[key][ch] ? "translate-x-6" : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ))}
+
+          {/* Sprint 15 — Global Webhook URL (Q6) */}
+          <div className="mt-5 pt-4 border-t border-gray-100">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Global Webhook URL{" "}
+              <span className="text-xs text-gray-400 font-normal">(Discord / Slack / Custom)</span>
+            </label>
+            <input
+              type="url"
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              placeholder="https://hooks.slack.com/services/..."
+              className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Sparas i notification_preferences.webhook_url — används av alla kategorier med webhook aktiverat.
+            </p>
+          </div>
+        </div>
+
+        {/* Sprint 15 — Alert Subscriptions CRUD */}
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <div className="flex justify-between items-center mb-4">
+            <div>
+              <h2 className="text-xl font-semibold text-primary">Aktiva Ticker-prenumerationer</h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Larm du har satt via Nexus-grafen · Klicka på en nod i grafen för att lägga till fler
+              </p>
+            </div>
+            <button
+              onClick={loadSubscriptions}
+              disabled={subsLoading}
+              className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-50 text-sm"
+            >
+              {subsLoading ? "Laddar..." : "↻ Uppdatera"}
+            </button>
+          </div>
+
+          {subscriptions.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 text-sm">
+              <div className="text-2xl mb-2">🔕</div>
+              Inga aktiva larm — klicka på en nod i Nexus-grafen för att prenumerera.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100">
+                    <th className="text-left pb-2">Ticker</th>
+                    <th className="text-center pb-2">Risktrösklar</th>
+                    <th className="text-left pb-2">Skapad</th>
+                    <th className="text-right pb-2">Ta bort</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {subscriptions.map((sub) => (
+                    <tr key={sub.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
+                      <td className="py-2.5 font-semibold text-gray-800">{sub.ticker}</td>
+                      <td className="py-2.5 text-center">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold ${
+                            sub.risk_threshold > 75
+                              ? "bg-red-100 text-red-700"
+                              : sub.risk_threshold > 40
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-green-100 text-green-700"
+                          }`}
+                        >
+                          ≥{sub.risk_threshold}%
+                        </span>
+                      </td>
+                      <td className="py-2.5 text-gray-400 text-xs">
+                        {new Date(sub.created_at).toLocaleDateString("sv-SE")}
+                      </td>
+                      <td className="py-2.5 text-right">
+                        <button
+                          onClick={() => handleDeleteSubscription(sub.ticker)}
+                          className="text-gray-400 hover:text-red-500 transition-colors text-base"
+                          title={`Ta bort larm för ${sub.ticker}`}
+                        >
+                          🗑
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Save Local Settings Button */}
