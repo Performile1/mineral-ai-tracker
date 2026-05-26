@@ -28,6 +28,7 @@ from psycopg2.extras import RealDictCursor
 
 from schemas.omniscient import BuyoutPrediction
 from utils.database import get_db_connection, release_db_connection
+from utils.fmp_client import fetch_fmp_fundamentals, format_fmp_for_prompt
 
 # ---------------------------------------------------------------------------
 # Config
@@ -36,6 +37,7 @@ from utils.database import get_db_connection, release_db_connection
 DILUTION_RISK_HIGH_THRESHOLD: float = 70.0
 SCORE_HIGH_DILUTION_WITH_TOP: float = 85.0
 SCORE_HIGH_DILUTION_NO_TOP: float = 45.0
+SMALL_CAP_THRESHOLD_USD: float = float(os.getenv("MA_SMALL_CAP_THRESHOLD_USD", "500_000_000"))  # $500M
 
 _MA_PROMPT = """SYSTEM INSTRUCTION: SOVEREIGN M&A PROBABILITY ASSESSOR
 
@@ -49,12 +51,17 @@ COMPANY DATA:
 - Active TAKE_OR_PAY Contracts: {take_or_pay_count}
 - Contract Detail: {contract_details}
 
+FINANCIAL FUNDAMENTALS (FMP live data):
+{fmp_block}
+
 EVALUATION RULES:
 1. A dilution risk score > 70 signals the company needs capital — making it vulnerable to acquisition offers.
 2. Active TAKE_OR_PAY contracts with major manufacturers are a STRATEGIC ASSET that attracts industrial buyers.
 3. A miner in a politically stable country (AU, CA, FI, SE, NO) commands a Western-buyer premium.
 4. A miner in a geopolitically stressed country (RU, CN, MM, CD) may attract a state-owned enterprise bid.
 5. If both dilution risk > 70 AND take-or-pay contracts exist, score should be 80–90.
+6. A market cap BELOW $500M USD combined with high debt/equity (>1.5) signals a distressed micro-cap — prime LBO or strategic buyout target.
+7. Negative or very low FCF margin (<0%) with active contracts signals urgent need for a partner/acquirer.
 
 OUTPUT (strict JSON only — no prose, no markdown):
 {{
@@ -95,12 +102,17 @@ async def evaluate_buyout_probability(
         for e in top_edges[:5]
     ) or "None"
 
+    use_live = os.getenv("USE_MOCK_DATA", "false").lower() != "true"
+    fmp_data = await _load_fmp_data(ticker) if use_live else {}
+    fmp_block = format_fmp_for_prompt(fmp_data) if fmp_data else "[FMP unavailable in mock mode]"
+
     prompt = _MA_PROMPT.format(
         ticker=ticker,
         domicile_country=domicile,
         dilution_risk_score=round(dilution_score, 1),
         take_or_pay_count=len(top_edges),
         contract_details=contract_details,
+        fmp_block=fmp_block,
     )
 
     score, reasoning, geo_ctx = await _call_claude_or_heuristic(
@@ -108,6 +120,7 @@ async def evaluate_buyout_probability(
         ticker=ticker,
         dilution_score=dilution_score,
         has_top=len(top_edges) > 0,
+        fmp_data=fmp_data,
     )
 
     prediction = BuyoutPrediction(
@@ -209,11 +222,21 @@ async def _load_take_or_pay_edges(ticker: str) -> List[Dict[str, Any]]:
         release_db_connection(conn)
 
 
+async def _load_fmp_data(ticker: str) -> dict:
+    """Fetch FMP fundamentals; returns {} silently on any error."""
+    try:
+        return await fetch_fmp_fundamentals(ticker)
+    except Exception as exc:
+        logger.warning(f"M&A Predictor: FMP fetch failed for {ticker}: {exc}")
+        return {}
+
+
 async def _call_claude_or_heuristic(
     prompt: str,
     ticker: str,
     dilution_score: float,
     has_top: bool,
+    fmp_data: dict | None = None,
 ) -> tuple[float, str, str]:
     """
     Returns (score, reasoning, geo_context).
@@ -247,17 +270,36 @@ async def _call_claude_or_heuristic(
         )
 
     # ---- Heuristic fallback -------------------------------------------------
+    fmp_data = fmp_data or {}
+    market_cap = fmp_data.get("market_cap")
+    debt_to_equity = fmp_data.get("debt_to_equity")
+    fcf_margin = fmp_data.get("fcf_margin")
+    is_micro_cap = market_cap is not None and market_cap < SMALL_CAP_THRESHOLD_USD
+    is_over_leveraged = debt_to_equity is not None and debt_to_equity > 1.5
+    is_fcf_negative = fcf_margin is not None and fcf_margin < 0.0
+
     if dilution_score >= DILUTION_RISK_HIGH_THRESHOLD and has_top:
-        score = SCORE_HIGH_DILUTION_WITH_TOP
+        base = SCORE_HIGH_DILUTION_WITH_TOP
+        boost = 5.0 if (is_micro_cap and is_over_leveraged) else 0.0
+        score = min(97.0, base + boost)
         reasoning = (
             f"High dilution risk ({dilution_score:.1f}) + active TAKE_OR_PAY "
             "contracts signal distressed but strategically valuable asset."
+            + (f" Micro-cap (${market_cap:,.0f}) + D/E {debt_to_equity:.2f} amplifies urgency." if boost else "")
         )
     elif dilution_score >= DILUTION_RISK_HIGH_THRESHOLD:
-        score = SCORE_HIGH_DILUTION_NO_TOP
+        base = SCORE_HIGH_DILUTION_NO_TOP
+        boost = 10.0 if is_micro_cap else 0.0
+        score = min(75.0, base + boost)
         reasoning = (
-            f"High dilution risk ({dilution_score:.1f}) without contractual "
-            "protection — distressed but lacks strategic moat for premium buyers."
+            f"High dilution risk ({dilution_score:.1f}) without contractual protection."
+            + (f" Micro-cap (${market_cap:,.0f}) makes it an easier opportunistic target." if boost else "")
+        )
+    elif is_micro_cap and is_fcf_negative:
+        score = 55.0
+        reasoning = (
+            f"Low dilution score but micro-cap (${market_cap:,.0f}) with negative FCF — "
+            "financially fragile, potential distressed sale candidate."
         )
     else:
         score = round(dilution_score * 0.6, 2)

@@ -8,6 +8,7 @@ PRD v10.0 Phase 11: Added Prometheus instrumentation for observability
 PRD v10.0 Phase 11: Added security headers middleware
 """
 
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -24,6 +25,11 @@ from slowapi.errors import RateLimitExceeded
 from prometheus_fastapi_instrumentator import Instrumentator
 
 
+_IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
+_CSP_SCRIPT_SRC = "'self'" if _IS_PRODUCTION else "'self' 'unsafe-inline' 'unsafe-eval'"
+_CSP_HEADER = f"default-src 'self'; script-src {_CSP_SCRIPT_SRC}; style-src 'self' 'unsafe-inline'"
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """PRD v10.0 Phase 11: Security headers middleware for all public endpoints"""
     
@@ -35,7 +41,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        response.headers["Content-Security-Policy"] = _CSP_HEADER
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
         
@@ -59,9 +65,20 @@ from api.hive import router as hive_router
 from api.admin import router as admin_router
 from api.events import router as events_router
 from api.pulse import router as pulse_router
+from api.audio import router as audio_router
+from api.screener import router as screener_router
+from api.operative import router as operative_router
+from api.infrastructure import router as infrastructure_router
+from api.nexus import router as nexus_router
+from api.black_swan import router as black_swan_router
+from api.trade_policy import router as trade_policy_router
+from api.dashboard import router as dashboard_router
 
 # Automation layer (PRD v8.3)
 from scrapers.scheduler import start_scheduler, stop_scheduler
+
+# Phase 2.1: DB connection pool lifecycle
+from utils.database import get_connection_pool, close_connection_pool
 
 # Configure logger
 logger.remove()
@@ -89,10 +106,15 @@ instrumentator = Instrumentator(
 )
 instrumentator.instrument(app)
 
-# CORS middleware - Restricted to localhost:3000 for security (Phase 9.9)
+# CORS middleware - Origins controlled via CORS_ORIGINS env var (Phase 2.2 Hardening)
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Restrict to frontend only
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -119,12 +141,22 @@ app.include_router(hive_router)
 app.include_router(admin_router)
 app.include_router(events_router)
 app.include_router(pulse_router)
+app.include_router(audio_router)
+app.include_router(screener_router)
+app.include_router(operative_router)
+app.include_router(infrastructure_router)
+app.include_router(nexus_router)
+app.include_router(black_swan_router)
+app.include_router(trade_policy_router)
+app.include_router(dashboard_router)
 
 
 # Automation lifecycle (PRD v8.3)
 @app.on_event("startup")
 async def _start_automation() -> None:
     try:
+        # Phase 2.1: Warm the shared DB connection pool
+        get_connection_pool()
         start_scheduler()
         # PRD v10.0 Phase 11: Expose Prometheus metrics on startup
         instrumentator.expose(app, include_in_schema=False, should_gzip=True)
@@ -136,12 +168,14 @@ async def _start_automation() -> None:
 @app.on_event("shutdown")
 async def _stop_automation() -> None:
     stop_scheduler()
+    # Phase 2.1: Return all pooled connections on shutdown
+    close_connection_pool()
 
 # Health check endpoint
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "version": "8.3"}
+    return {"status": "healthy", "version": "11.0"}
 
 # Root endpoint
 @app.get("/")
