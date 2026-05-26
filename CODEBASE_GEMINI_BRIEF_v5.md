@@ -467,19 +467,99 @@ RAG_SIMILARITY_THRESHOLD=0.7
 
 ---
 
-## 11. Nästa naturliga steg (Sprint 18)
+## 11. Slutgiltig Vägkarta — Sprint 18 → 22
 
-### Kritiska
-1. **Skuld B: Koppla Quant Watchdog i SLM-kedjan** — steg 5 i `slm_orchestrator.py`
-2. **Skuld A+RBAC: Admin-rollskydd** — `is_admin` boolean i users + `get_admin_user()` dep
-3. **Skuld M: Audio RAG shim** — migrera `audio_tasks.py` till `engines/rag_engine.store_document()`
+### Sprintstatus-översikt
 
-### Viktiga
-4. **Tester för Sprint 16-17 agents** — MockFMPProvider pattern för `ma_predictor.py`
-5. **Alert Subscription UI** — `🔔 Notify me`-knapp på Nexus-noder → modal → POST subscriptions
-6. **Filtrera utgångna kontrakt** — `AND (contract_expiry_date IS NULL OR contract_expiry_date >= CURRENT_DATE)` i `/graph`
+| Sprint | Namn | Kärnkomponent | Status |
+|---|---|---|---|
+| 16 | Omniscient Expansion | Multi-agent arkitektur + DB-fundament | ✅ KLAR (a6ad796) |
+| 17 | The Live Wire | Live FMP, RSS & God Mode Dashboard | ✅ KLAR (b713112) |
+| 18 | CleanSlate & RBAC | Migration 0007, Admin-skydd & Refaktorering | ✅ KLAR (a8b4625) |
+| 19 | Alert Delivery Engine | Skarpa webhooks + Frontend Subscription UI | Backlog |
+| 20 | Hardening & Tests | Utgångna kontrakt, testtäckning, centraliserad config | Backlog |
+| 21 | Secondary Supply UI | Macro-graf + `/api/macro/secondary-supply` | Backlog |
+| 22 | The Hive Mind Protocol | Cross-user signal-delning, Global Pulse | Backlog |
 
-### Arkitektur
-7. **Migration 0007** — DROP `contract_volume` (Skuld D) + unifiera webhook under `notification_preferences` (Q6)
-8. **Hive Mind cross-node** (Q9) — besluta Alt A/C baserat på community-intresse
-9. **Centralisera `USE_MOCK_DATA`** till `config.py` (Q11)
+---
+
+### Sprint 19 — Alert Delivery Engine & Subscription UI
+
+**Backend: Webhook Dispatcher**
+- Ersätt `_dispatch_to_user()` stubben i larmhanteringen (just nu loggar "not yet implemented")
+- Läs `notification_preferences` JSONB — dispatcha till generiska webhooks (Slack, Teams, Zapier, n8n)
+- Triggers: `scrap_surge` (SecondarySupply) + `chokepoint_alert` (ChokepointOracle) + M&A-varningar
+
+**Frontend: Alert Subscriptions**
+- `🔔 Prenumerera`-knapp i Nexus-grafens nod-tooltip/modal
+- Formulär för individuell `risk_threshold` per bolag → POST till `/api/settings/alerts/subscriptions`
+- Stäng UI-gapet: `user_alerts`-tabellen finns, frontend saknas
+
+**Nyckel-filer:** `api/alerts.py` `_dispatch_to_user()`, `frontend/app/dashboard/nexus/page.tsx`
+
+---
+
+### Sprint 20 — Hardening, Test-Gaps & Edge Cases
+
+**Graph Optimization (Skuld I)**
+```sql
+-- api/nexus.py, edge-SELECT:
+AND (contract_expiry_date IS NULL OR contract_expiry_date >= CURRENT_DATE)
+```
+
+**Test-Suite Upgrade**
+- `TestSentimentCrawler` — MockRSSFetcher + MockGeminiClient pattern
+- `TestMAPredictor` — MockFMPProvider pattern (liknande `MockQuantProvider`)
+- Mål: noll regressions i CI/CD utan skarpa API-anrop
+
+**Centraliserad Config (Skuld Q11)**
+- Flytta `os.getenv("USE_MOCK_DATA")`, `MA_SMALL_CAP_THRESHOLD_USD`, `SENTIMENT_RSS_FEEDS`
+  till `config.py` Pydantic Settings-klass
+- Ersätt alla fristående `os.getenv()`-anrop med `from config import settings`
+
+**Nyckel-filer:** `backend/tests/`, `api/nexus.py`, `config.py`
+
+---
+
+### Sprint 21 — Secondary Supply & Macro Analytics UI
+
+**Backend: Macro Data Endpoint**
+- Ny route: `GET /api/macro/secondary-supply`
+- Returnerar tidsseriedata från `secondary_supply`-tabellen
+  (Copper Scrap Spread, Black Mass Index)
+
+**Frontend: Macro Dashboard**
+- Utöka bento-gridet på `/dashboard` med "Secondary Supply Pressure"-sektion
+- Recharts-graf med kritisk gräns (`< $0.10/lb` → nybrytning hotas av återvunnet material)
+- Datakälla: `agents/secondary_supply.py` → `secondary_supply`-tabellen → ny API-route
+
+**Nyckel-filer:** `agents/secondary_supply.py`, ny `api/macro_secondary.py`, `frontend/app/dashboard/page.tsx`
+
+---
+
+### Sprint 22 — The Hive Mind Protocol (Cross-User Intelligence)
+
+**Backend: Signal Aggregator**
+- Implementera `POST /api/hive/contribute` fullt ut i `api/hive.py`
+  (anonymiserat: ticker, signal_type, confidence_score — ingen rådata)
+- Valfri HMAC-signering för cross-instance autentisering
+  (`HIVE_MIND_SHARED_KEY` env var)
+- Lagra i `hive_signals`-tabellen, aggregera till konsensus-score
+
+**Frontend: Global Pulse i God Mode**
+- Utöka `GodModePanel` med femte widget: "🐝 Hive Mind / Global Pulse"
+- Konsumera `GET /api/pulse/top-convictions`
+- Realtidslista: hetaste uppköpskandidater + mest bevakade flaskhalsar
+  (strikt anonymiserat, ingen användardata)
+
+**Nyckel-filer:** `api/hive.py`, `frontend/app/dashboard/page.tsx` (GodModePanel)
+
+---
+
+### Kvarvarande teknisk skuld (prioritetsordning)
+
+| # | Skuld | Sprint | Fil |
+|---|---|---|---|
+| B | Quant Watchdog ej kopplad i SLM-kedjan | 20 (el. fristående) | `slm_orchestrator.py` |
+| M | Audio RAG shim troligen trasig | 20 | `worker/tasks/audio_tasks.py` |
+| N | `user_alerts.updated_at` uppdateras inte vid upsert | 20 | migration 0008 |
