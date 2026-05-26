@@ -1,199 +1,237 @@
-# Mineral AI Tracker - The Decentralized Financial Intelligence Protocol
+# Mineral AI Tracker — Sovereign Supply-Chain Intelligence
 
-**Version 13.2 | Production-Ready Open Source Protocol**
-
----
-
-## The Sovereign Protocol
-
-Mineral AI Tracker is a decentralized financial intelligence protocol that enables sovereign data analysis through multi-model AI orchestration. Each node in the network operates independently, running local AI models (Ollama) or cloud models (Gemini) to analyze financial intelligence, then optionally contributes anonymous signals to a distributed Hive Mind consensus layer.
-
-### Core Philosophy
-
-- **Data Sovereignty**: Your data never leaves your infrastructure. Analysis runs locally or on your cloud infrastructure.
-- **Model Agnosticism**: Choose between local SLM swarms (Phi-3, Mistral, Llama-3) or cloud models (Gemini Flash/Pro) with dynamic pricing.
-- **Hive Mind Consensus**: Optional anonymous contribution to a distributed intelligence layer that aggregates signals across nodes.
-- **Transaction Safety**: Enterprise-grade credit management with atomic transactions and automatic refunds on failure.
+**Sprint 17 · Live Wire & God Mode Dashboard**
 
 ---
 
-## Architecture
+## Vad är det här?
 
-### Backend Stack
+Mineral AI Tracker är ett **supply-chain intelligence-system för kritiska mineral** (koppar, nickel, litium, uran m.fl.). Det kombinerar ett nätverks-visualiseringsverktyg (Nexus-graf), AI-agenter för M&A-prediktering och geopolitisk riskbedömning, samt ett aggregerat "God Mode"-kommandocenter.
 
-- **Framework**: FastAPI (Python 3.10+) with async/await
-- **Database**: PostgreSQL 14+ with pgvector extension for semantic search
-- **Task Queue**: Celery with Redis for async job processing
-- **AI Orchestration**: Multi-SLM Debate Protocol (Phi-3 → Mistral → Llama-3)
-- **Cloud Integration**: Google Gemini API (optional, with dynamic pricing)
-- **Monitoring**: Prometheus + Grafana for observability
+Varje installation är **suverän** — all data stannar i din egna PostgreSQL. Du kan valfritt bidra med anonyma konsensussignaler till en gemensam Hive Mind.
 
-### Frontend Stack
+### Kärnprinciper
 
-- **Framework**: Next.js 14 with App Router and TypeScript
-- **Styling**: Tailwind CSS with custom design tokens
-- **State Management**: React hooks with server components
-- **Authentication**: NextAuth.js with JWT session management
-- **Charts**: Recharts for financial visualization
-
-### Multi-Model AI Engine
-
-- **Local Swarm**: Phi-3 (extraction) → Mistral (geology) → Llama-3 (risk) - 1 Credit
-- **Cloud Engine**: Gemini Flash (fast analysis) - 2 Credits
-- **Deep Cloud**: Gemini Pro (1M token context) - 5 Credits
+- **Data Sovereignty**: Din data lämnar aldrig din infrastruktur.
+- **Model Agnosticism**: Lokala SLM-swarms (Ollama) eller molnmodeller (Gemini, Claude).
+- **Hive Mind Consensus**: Valfri anonym signal-delning till ett distribuerat konsensus-lager.
+- **Transaction Safety**: Atomära kredit-transaktioner med automatisk återbetalning vid fel.
 
 ---
 
-## Quick Start for Node Runners
+## Arkitektur
 
-### Prerequisites
+### Backend
+
+| Komponent | Teknik |
+|---|---|
+| Web-framework | FastAPI (Python 3.10+) |
+| Databas | PostgreSQL 16 + pgvector |
+| Schemamigrationer | Alembic (7 revisioner, 0000→0006) |
+| Connection pool | psycopg2 ThreadedConnectionPool |
+| Schemaläggare | APScheduler 3.10 (3 nattliga jobb) |
+| Async broker | Celery 5 + Redis (valfritt) |
+| AI-modeller | Ollama (Phi-3/Llama-3) + Gemini Flash/Pro + Claude 3.5 Sonnet |
+| Auth | NextAuth JWT (HS256) |
+| Rate limiting | SlowAPI |
+| Observability | Prometheus + Grafana |
+
+### Frontend
+
+| Komponent | Teknik |
+|---|---|
+| Framework | Next.js 14 App Router + TypeScript |
+| Styling | Tailwind CSS |
+| Graf-visualisering | react-force-graph-2d (canvas, animerad) |
+| Auth | NextAuth.js |
+| Charts | Recharts |
+
+### AI-modeller
+
+| Modell | Kostnad | Användning |
+|---|---|---|
+| Local Swarm (Ollama) | 1 kredit | Phi-3 → Mistral → Llama-3 debate |
+| Gemini Flash | 2 krediter | Sentimentklassificering, snabbanalys |
+| Gemini Pro | 5 krediter | Djupanalys, 1M-token kontext |
+| Claude 3.5 Sonnet | 5 krediter | M&A-prediktering, strukturerad extraktion |
+
+### Schemalagda jobb
+
+| Tid | Jobb | Vad det gör |
+|---|---|---|
+| 06:00 | `target_list_sweep` | Scraper + SLM-debate per bevakad nod |
+| 03:00 | `contract_decay_job` | Markerar utgångna kontrakt |
+| 07:00 | `omniscient_pipeline` | Chokepoint Oracle → Secondary Supply → M&A Predictor → Sentiment Crawler |
+
+---
+
+## Funktioner (Sprint 17)
+
+- **Nexus-graf** — supply-chain-nätverk med M&A Radar-läge, geo-friktionsvisning, kantdisputemarkering
+- **God Mode Dashboard** — 4 aggregerade kort: Top M&A Targets, Critical Dilution Risks, Active Disputes, Chokepoint Alerts
+- **M&A Predictor** — Claude + FMP live-fundamentals beräknar `buyout_probability_score` per PRODUCER-nod
+- **Chokepoint Oracle** — spårar Panama/Suez-korridorer och påverkar `geopolitical_friction_cost` på edges
+- **Live Sentiment Crawler** — parallell RSS-hämtning + Gemini Flash batch-klassificering av arbetsmarknadskonflikter
+- **Alert Subscriptions** — prenumerera på risktrösklar per ticker, routing via email/in-app/webhook
+- **Multi-SLM Debate** — Phi-3 → Mistral → Llama-3 → Quant Watchdog för daglig nod-sweep
+
+---
+
+## Kom igång
+
+### Förutsättningar
 
 - Docker Desktop 4.0+
-- Ollama (for local SLM swarm, optional)
-- Financial Modeling Prep API key (required for institutional data)
+- `FMP_API_KEY` (Financial Modeling Prep — obligatorisk för live-data)
+- `GEMINI_API_KEY` (valfri, för Gemini-modeller och sentiment-crawlern)
+- `ANTHROPIC_API_KEY` (valfri, för Claude-baserad M&A-prediktering)
 
 ### Installation
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/mineral-ai-tracker.git
+# 1. Klona repot
+git clone https://github.com/Performile1/mineral-ai-tracker.git
 cd mineral-ai-tracker
 
-# 2. Copy environment template
+# 2. Kopiera miljömall
 cp .env.example .env
+# Redigera .env — fyll minst i FMP_API_KEY och NEXTAUTH_SECRET
 
-# 3. Configure your environment
-# Edit .env and add your FMP_API_KEY
-# For Gemini models, add GEMINI_API_KEY (optional)
-
-# 4. Start the infrastructure
+# 3. Starta Docker-tjänster
 docker-compose up -d
 
-# 5. Initialize the database
-# Database migrations run automatically on first startup
-# Access the frontend at http://localhost:3000
+# 4. Kör Alembic-migrationer
+cd backend && alembic upgrade head
+
+# 5. Starta backend (port 8000) + frontend (port 3000)
+# Backend: uvicorn main:app --reload
+# Frontend: cd frontend && npm install && npm run dev
+# Frontend nås på http://localhost:3000
 ```
 
-### Docker Services
+### Docker-tjänster
 
-The `docker-compose.yml` orchestrates the following services:
-
-- **frontend**: Next.js application (port 3000)
-- **backend**: FastAPI API server (port 8000)
-- **postgres**: PostgreSQL with pgvector (port 5432)
-- **redis**: Redis for Celery task queue (port 6379)
-- **ollama**: Local SLM inference (port 11434)
-- **celery_worker**: Async task processing
-- **prometheus**: Metrics collection (port 9090)
-- **grafana**: Metrics visualization (port 3001)
-
----
-
-## Configuration
-
-### Environment Variables
-
-All configuration is managed through environment variables. See `.env.example` for the complete structure.
-
-**Required Variables:**
-- `FMP_API_KEY`: Financial Modeling Prep API key for institutional data
-- `POSTGRES_PASSWORD`: Database password (change from default for production)
-
-**Optional Variables:**
-- `GEMINI_API_KEY`: Google Gemini API key for cloud models
-- `USE_CELERY`: Enable async task processing (default: True)
-- `USE_PROXIES`: Enable proxy rotation for web scraping
-
-### Database Initialization
-
-The database schema is initialized automatically on first startup. Migration files in `db/init/` are executed in order:
-
-- `00_init_schema.sql`: Core tables and pgvector extension
-- `01_*.sql` through `14_*.sql`: Feature-specific migrations
+| Tjänst | Port | Beskrivning |
+|---|---|---|
+| `frontend` | 3000 | Next.js dashboard |
+| `backend` | 8000 | FastAPI API |
+| `postgres` | 5432 | PostgreSQL + pgvector |
+| `redis` | 6379 | Cache + Celery broker |
+| `ollama` | 11434 | Lokal SLM-inference (Phi-3, Llama-3) |
+| `celery_worker` | — | Async task-processing |
+| `prometheus` | 9090 | Metrics-insamling |
+| `grafana` | 3001 | Metrics-visualisering (admin/admin) |
 
 ---
 
-## Multi-Model AI System
+## Konfiguration
 
-### Model Selection
+### Miljövariabler
 
-Users select their preferred AI model through the frontend:
+All konfiguration hanteras via miljövariabler. Se `.env.example` för komplett mall.
 
-- **Local Swarm**: Runs entirely on your infrastructure using Ollama
-- **Cloud Engine**: Fast analysis via Google Gemini Flash
-- **Deep Cloud**: Deep analysis via Google Gemini Pro
+**Obligatoriska:**
+- `FMP_API_KEY` — Financial Modeling Prep (live-fundamentals för M&A Predictor)
+- `POSTGRES_PASSWORD` — Databaslösenord (byt från default i produktion)
+- `NEXTAUTH_SECRET` — JWT-hemlighet (`openssl rand -base64 32`)
 
-### Dynamic Pricing
+**Viktiga valfria (AI-modeller):**
+- `GEMINI_API_KEY` — Gemini Flash/Pro + live sentiment-klassificering
+- `ANTHROPIC_API_KEY` — Claude 3.5 Sonnet för M&A-prediktering
 
-Credit costs vary by model:
-- Local Swarm: 1 credit per analysis
-- Gemini Flash: 2 credits per analysis
-- Gemini Pro: 5 credits per analysis
+**Sprint 16-17 specifika:**
+- `USE_MOCK_DATA=false` — Aktiverar live FMP + live RSS (default: false)
+- `SENTIMENT_RSS_FEEDS` — Komma-separerade RSS-URL:er (har standardvärde)
+- `MA_SMALL_CAP_THRESHOLD_USD` — Micro-cap-gräns för M&A heuristik (default: 500000000)
 
-### Transaction Safety
+### Databasinitialisering
 
-The credit system implements enterprise-grade transaction safety:
+Kör `alembic upgrade head` i `backend/` för att applicera alla 7 Alembic-revisioner:
 
-1. **Pre-authorization**: Credits verified before analysis starts
-2. **Atomic Deduction**: Credits deducted immediately to prevent race conditions
-3. **Automatic Refund**: Full refund if analysis fails (no automatic fallback)
-4. **Clear Messaging**: Users receive explicit notification when credits are refunded
+```
+0000 → baseline
+0001 → take_or_pay fields
+0002 → unique index + expiry flag
+0003 → notification_preferences JSONB
+0004 → user_alerts table
+0005 → trade policy + geo fields
+0006 → omniscient expansion (buyout_probability_score, is_early_warning)
+```
+
+---
+
+## AI-system
+
+### Modellval
+
+Användare väljer AI-modell i frontend. Dynamisk prissättning:
+
+| Modell | Krediter | Beskrivning |
+|---|---|---|
+| Local Swarm | 1 | Ollama-pipeline (Phi-3 → Mistral → Llama-3) |
+| Gemini Flash | 2 | Snabbanalys, sentiment-batch |
+| Gemini Pro | 5 | Djupanalys, 1M-token |
+| Claude 3.5 | 5 | M&A-prediktering, JSON-extraktion |
+
+### Transaktionssäkerhet
+
+1. **Pre-auth**: Krediter kontrolleras innan analys startar
+2. **Atomic deduction**: Dras omedelbart, förhindrar race conditions
+3. **Auto-refund**: Full återbetalning om analysen misslyckas
+4. **Clear messaging**: Användaren notifieras explicit vid återbetalning
 
 ---
 
 ## Hive Mind Protocol
 
-### Anonymous Signal Contribution
+### Anonym signaldelning
 
-Nodes can optionally contribute anonymous signals to the Hive Mind:
+Noder kan valfritt bidra anonyma signaler:
 
-1. User enables "Share with Hive Mind" in the UI
-2. Signal is anonymized (no user identifiers)
-3. Signal is aggregated with other nodes' signals
-4. Consensus score is calculated across the network
-5. Global Pulse ranking displays top conviction signals
+1. Användare aktiverar "Share with Hive Mind" i UI
+2. Signal anonymiseras — inga användaridentifierare
+3. Aggregeras med andra noders signaler
+4. Konsensusscore beräknas
+5. Global Pulse visar top-conviction-signaler
 
-### Data Privacy
+### Dataintegritet
 
-- No user data is ever shared with the Hive Mind
-- Only aggregated signal metadata (ticker, signal_type, confidence_score, consensus_score)
-- Optional feature - can be disabled for complete privacy
+- Ingen användardata delas
+- Endast aggregerad metadata: ticker, signal_type, confidence_score
+- Valfritt — kan stängas av för fullständig isolering
 
----
-
-## API Endpoints
-
-### Intelligence API
-
-- `POST /api/intelligence/analyze`: Run multi-SLM debate protocol
-- `GET /api/intelligence/models/available`: Get available AI models
-- `GET /api/intelligence/signals`: List intelligence signals
-
-### Watchlist API
-
-- `POST /api/watchlist/stalk`: On-demand analysis of a ticker
-- `GET /api/watchlist/status/{task_id}`: Check Celery task status
-
-### User API
-
-- `GET /api/pulse/credits`: Get user credit balance
-- `GET /api/pulse/top-convictions`: Get Hive Mind top convictions
+**Se `CONTRIBUTING.md` avsnitt 4 för fullständig Hive Mind-arkitektur och fork-guide.**
 
 ---
 
-## Development
+## API-endpoints (urval)
 
-### Backend Development
+| Metod | Route | Beskrivning |
+|---|---|---|
+| POST | `/api/intelligence/analyze` | Kör multi-SLM debate |
+| GET | `/api/intelligence/signals` | Lista analyser |
+| GET | `/api/nexus/graph` | Supply-chain-graf (noder + kanter) |
+| GET | `/api/dashboard/summary` | God Mode aggregerad snapshot |
+| GET | `/api/settings/alerts/subscriptions` | Lista alert-prenumerationer |
+| POST | `/api/settings/alerts/subscriptions` | Upsert prenumeration |
+| GET | `/api/pulse/top-convictions` | Hive Mind konsensus-ranking |
+| GET | `/api/health` | Systemhälsa |
+
+---
+
+## Utveckling
+
+### Backend
 
 ```bash
 cd backend
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+venv\Scripts\activate    # Windows
 pip install -r requirements.txt
-python main.py
+uvicorn main:app --reload
 ```
 
-### Frontend Development
+### Frontend
 
 ```bash
 cd frontend
@@ -201,16 +239,12 @@ npm install
 npm run dev
 ```
 
-### Running Tests
+### Tester
 
 ```bash
-# Backend tests
 cd backend
-pytest
-
-# Frontend tests
-cd frontend
-npm test
+pytest tests/ -v --tb=short
+# Förväntad output: 45 PASSED, 0 FAILED
 ```
 
 ---
@@ -254,23 +288,19 @@ Access Grafana at http://localhost:3001 (default: admin/admin)
 
 ---
 
-## Contributing
+## Bidra / Fork
 
-We welcome contributions from the community. Please see `CONTRIBUTING.md` for guidelines.
-
-### Development Workflow
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
+Se [`CONTRIBUTING.md`](CONTRIBUTING.md) för:
+- Hur du bidrar med kod (PR-workflow)
+- **Komplett fork-guide** (steg-för-steg, egna API-nycklar)
+- Adminåtkomst och isolering per nod
+- Hive Mind-arkitektur och signaldelning
 
 ---
 
-## License
+## Licens
 
-MIT License - See `LICENSE` file for details
+MIT — se [`LICENSE`](LICENSE)
 
 ---
 
@@ -284,10 +314,10 @@ Users are solely responsible for their investment decisions. The system provides
 
 ## Support
 
-- **Documentation**: See `docs/` directory for detailed documentation
-- **Issues**: Report bugs via GitHub Issues
-- **Discussions**: Use GitHub Discussions for questions and ideas
+- **Issues**: Rapportera buggar via [GitHub Issues](https://github.com/Performile1/mineral-ai-tracker/issues)
+- **Discussions**: Frågor och idéer via [GitHub Discussions](https://github.com/Performile1/mineral-ai-tracker/discussions)
+- **Gemini-analys**: Se `CODEBASE_GEMINI_BRIEF_v5.md` för arkitekturgenomgång
 
 ---
 
-**Built with ❤️ for the decentralized financial intelligence community**
+**Byggd för suverän finansiell intelligens inom kritiska mineraler**
