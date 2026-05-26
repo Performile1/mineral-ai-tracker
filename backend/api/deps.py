@@ -11,6 +11,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError, ExpiredSignatureError
 from loguru import logger
+from psycopg2.extras import RealDictCursor
+from utils.database import get_db_connection, release_db_connection
 
 security = HTTPBearer()
 
@@ -98,6 +100,36 @@ async def get_current_user(
         "email": payload.get("email"),
         "name": payload.get("name"),
     }
+
+
+async def get_admin_user(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """
+    Require the authenticated user to have is_admin=TRUE in the users table.
+
+    Added in Sprint 18 (migration 0007). Node operators promote a user via:
+      UPDATE users SET is_admin = TRUE WHERE email = 'operator@example.com';
+
+    Raises:
+        HTTPException 403 if the user exists but is not an admin.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT is_admin FROM users WHERE id = %s",
+                (current_user["id"],),
+            )
+            row = cur.fetchone()
+            if not row or not row.get("is_admin"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Admin access required",
+                )
+    finally:
+        release_db_connection(conn)
+    return current_user
 
 
 async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))) -> Optional[dict]:

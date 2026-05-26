@@ -10,8 +10,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from loguru import logger
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
+from utils.database import get_db_connection, release_db_connection
 
 from api.deps import get_current_user
 
@@ -31,11 +31,13 @@ class AlertConfig(BaseModel):
     alert_on_sell: bool = Field(True, description="Alert on SELL signals")
     alert_on_pass: bool = Field(False, description="Alert on PASS signals")
     telegram_enabled: bool = Field(False, description="Enable Telegram notifications")
-    telegram_chat_id: Optional[str] = Field(None, description="Telegram chat ID")
     discord_enabled: bool = Field(False, description="Enable Discord notifications")
-    discord_webhook_url: Optional[str] = Field(None, description="Discord webhook URL")
     email_enabled: bool = Field(False, description="Enable email notifications")
     email_address: Optional[str] = Field(None, description="Email address for notifications")
+    notification_preferences: dict = Field(
+        default_factory=dict,
+        description="Webhook contacts: {telegram_chat_id, discord_webhook_url}",
+    )
 
 
 class AlertConfigResponse(AlertConfig):
@@ -65,18 +67,6 @@ class AlertHistoryItem(BaseModel):
 # Database Helpers
 # ============================================================================
 
-def get_db_connection():
-    """Get database connection"""
-    import os
-    return psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "localhost"),
-        port=int(os.getenv("POSTGRES_PORT", "5432")),
-        database=os.getenv("POSTGRES_DB", "mineral_ai_tracker"),
-        user=os.getenv("POSTGRES_USER", "mineral_user"),
-        password=os.getenv("POSTGRES_PASSWORD", "mineralpass123"),
-        cursor_factory=RealDictCursor
-    )
-
 
 def ensure_alert_tables():
     """Ensure alert tables exist"""
@@ -93,9 +83,7 @@ def ensure_alert_tables():
                     alert_on_sell BOOLEAN DEFAULT true,
                     alert_on_pass BOOLEAN DEFAULT false,
                     telegram_enabled BOOLEAN DEFAULT false,
-                    telegram_chat_id VARCHAR(255),
                     discord_enabled BOOLEAN DEFAULT false,
-                    discord_webhook_url TEXT,
                     email_enabled BOOLEAN DEFAULT false,
                     email_address VARCHAR(255),
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -114,7 +102,7 @@ def ensure_alert_tables():
             """)
             conn.commit()
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 # ============================================================================
@@ -140,7 +128,7 @@ class AlertManager:
                     for row in rows:
                         self.config_cache[str(row['id'])] = AlertConfig(**dict(row))
             finally:
-                conn.close()
+                release_db_connection(conn)
             logger.info(f"Loaded {len(self.config_cache)} alert configurations")
         except Exception as e:
             logger.error(f"Failed to load alert configs: {e}")
@@ -182,21 +170,23 @@ class AlertManager:
         """
         sent_channels = []
         
-        if config.telegram_enabled and config.telegram_chat_id:
+        tg_chat_id = config.notification_preferences.get("telegram_chat_id")
+        if config.telegram_enabled and tg_chat_id:
             try:
                 from notifications.telegram import send_telegram_message
                 message = self._format_alert_message(signal, "telegram")
-                await send_telegram_message(config.telegram_chat_id, message)
+                await send_telegram_message(tg_chat_id, message)
                 sent_channels.append("telegram")
                 logger.info(f"Telegram alert sent for signal {signal.get('id')}")
             except Exception as e:
                 logger.error(f"Failed to send Telegram alert: {e}")
-        
-        if config.discord_enabled and config.discord_webhook_url:
+
+        discord_url = config.notification_preferences.get("discord_webhook_url")
+        if config.discord_enabled and discord_url:
             try:
                 from notifications.discord import send_discord_webhook
                 embed = self._format_alert_message(signal, "discord")
-                await send_discord_webhook(config.discord_webhook_url, embed)
+                await send_discord_webhook(discord_url, embed)
                 sent_channels.append("discord")
                 logger.info(f"Discord alert sent for signal {signal.get('id')}")
             except Exception as e:
@@ -258,7 +248,7 @@ AI Reasoning: {llama3_reasoning[:500]}...
                         """, (signal_id, channel, "sent"))
                     conn.commit()
             finally:
-                conn.close()
+                release_db_connection(conn)
         except Exception as e:
             logger.error(f"Failed to log alert history: {e}")
 
@@ -287,7 +277,7 @@ async def get_alert_configs(
                 rows = cur.fetchall()
                 return [AlertConfigResponse(**dict(r)) for r in rows]
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to get alert configs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -306,15 +296,17 @@ async def create_alert_config(
         try:
             with conn.cursor() as cur:
                 # Critical Hotfix: Use authenticated user_id instead of 'default'
+                import json as _json
                 cur.execute("""
                     INSERT INTO alert_configs (
                         user_id, confidence_threshold, price_drift_threshold,
                         alert_on_buy, alert_on_sell, alert_on_pass,
-                        telegram_enabled, telegram_chat_id,
-                        discord_enabled, discord_webhook_url,
-                        email_enabled, email_address
+                        telegram_enabled,
+                        discord_enabled,
+                        email_enabled, email_address,
+                        notification_preferences
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     ) RETURNING id, created_at, updated_at
                 """, (
                     user_id,
@@ -324,11 +316,10 @@ async def create_alert_config(
                     config.alert_on_sell,
                     config.alert_on_pass,
                     config.telegram_enabled,
-                    config.telegram_chat_id,
                     config.discord_enabled,
-                    config.discord_webhook_url,
                     config.email_enabled,
-                    config.email_address
+                    config.email_address,
+                    _json.dumps(config.notification_preferences),
                 ))
                 row = cur.fetchone()
                 conn.commit()
@@ -344,7 +335,7 @@ async def create_alert_config(
                     updated_at=row['updated_at'].isoformat()
                 )
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to create alert config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -364,6 +355,7 @@ async def update_alert_config(
         try:
             with conn.cursor() as cur:
                 # Critical Hotfix: Add user_id check to prevent cross-user updates
+                import json as _json
                 cur.execute("""
                     UPDATE alert_configs SET
                         confidence_threshold = %s,
@@ -372,11 +364,10 @@ async def update_alert_config(
                         alert_on_sell = %s,
                         alert_on_pass = %s,
                         telegram_enabled = %s,
-                        telegram_chat_id = %s,
                         discord_enabled = %s,
-                        discord_webhook_url = %s,
                         email_enabled = %s,
                         email_address = %s,
+                        notification_preferences = %s::jsonb,
                         updated_at = NOW()
                     WHERE id = %s AND user_id = %s
                     RETURNING id, user_id, created_at, updated_at
@@ -387,13 +378,12 @@ async def update_alert_config(
                     config.alert_on_sell,
                     config.alert_on_pass,
                     config.telegram_enabled,
-                    config.telegram_chat_id,
                     config.discord_enabled,
-                    config.discord_webhook_url,
                     config.email_enabled,
                     config.email_address,
+                    _json.dumps(config.notification_preferences),
                     config_id,
-                    user_id
+                    user_id,
                 ))
                 row = cur.fetchone()
                 if not row:
@@ -411,7 +401,7 @@ async def update_alert_config(
                     updated_at=row['updated_at'].isoformat()
                 )
         finally:
-            conn.close()
+            release_db_connection(conn)
     except HTTPException:
         raise
     except Exception as e:
@@ -450,7 +440,7 @@ async def send_test_alert(
                     raise HTTPException(status_code=404, detail="No alert configuration found. Please create one first.")
                 config = AlertConfig(**dict(row))
         finally:
-            conn.close()
+            release_db_connection(conn)
         
         # Send test alert
         await alert_manager.send_alert(test_signal, config)
@@ -492,7 +482,7 @@ async def get_alert_history(
                     for r in rows
                 ]
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to get alert history: {e}")
         raise HTTPException(status_code=500, detail=str(e))

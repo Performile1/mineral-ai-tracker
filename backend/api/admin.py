@@ -5,32 +5,25 @@ Description: Admin dashboard for real-time system observability and analysis tra
 """
 
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends, Request
 
-from api.deps import get_current_user
+from api.deps import get_admin_user
 from loguru import logger
 from datetime import datetime, timedelta
-import psycopg2
 from psycopg2.extras import RealDictCursor
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from utils.database import get_db_connection, release_db_connection
+
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-def get_db_connection():
-    """Get database connection"""
-    return psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="mineral_ai_tracker",
-        user="mineral_user",
-        password="mineralpass123",
-        cursor_factory=RealDictCursor
-    )
-
 
 @router.get("/dashboard")
 async def get_admin_dashboard(
-    current_user: dict = Depends(get_current_user)  # Critical Hotfix: Require authentication
+    current_user: dict = Depends(get_admin_user)
 ) -> Dict[str, Any]:
     """
     Get admin dashboard data (PRD v10.0 Phase 10.6)
@@ -155,7 +148,7 @@ async def get_admin_dashboard(
                 dashboard_data["system_health"]["database"] = "ok"
                 
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to fetch dashboard data: {e}")
         dashboard_data["system_health"]["database"] = "error"
@@ -167,7 +160,7 @@ async def get_admin_dashboard(
 async def get_analysis_timeline(
     days: int = Query(7, description="Number of days to look back"),
     limit: int = Query(100, description="Maximum number of records"),
-    current_user: dict = Depends(get_current_user)  # Critical Hotfix: Require authentication
+    current_user: dict = Depends(get_admin_user),
 ) -> Dict[str, Any]:
     """
     Get analysis timeline for admin dashboard (PRD v10.0 Phase 10.6)
@@ -217,7 +210,7 @@ async def get_analysis_timeline(
                 ]
                 
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to fetch analysis timeline: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch timeline: {e}")
@@ -232,7 +225,7 @@ async def get_analysis_timeline(
 @router.get("/performance-metrics")
 async def get_performance_metrics(
     days: int = Query(30, description="Number of days to analyze"),
-    current_user: dict = Depends(get_current_user)  # Critical Hotfix: Require authentication
+    current_user: dict = Depends(get_admin_user)
 ) -> Dict[str, Any]:
     """
     Get performance metrics for admin dashboard (PRD v10.0 Phase 10.6)
@@ -305,7 +298,7 @@ async def get_performance_metrics(
                 ]
                 
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to fetch performance metrics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch metrics: {e}")
@@ -315,7 +308,7 @@ async def get_performance_metrics(
 
 @router.get("/celery-status")
 async def get_celery_status(
-    current_user: dict = Depends(get_current_user)  # Critical Hotfix: Require authentication
+    current_user: dict = Depends(get_admin_user)
 ) -> Dict[str, Any]:
     """
     Get Celery queue status (PRD v10.0 Phase 11)
@@ -370,7 +363,7 @@ async def get_celery_status(
 
 @router.get("/prometheus-metrics")
 async def get_prometheus_metrics(
-    current_user: dict = Depends(get_current_user)  # Critical Hotfix: Require authentication
+    current_user: dict = Depends(get_admin_user)
 ) -> Dict[str, Any]:
     """
     Get Prometheus metrics in JSON format (PRD v10.0 Phase 11)
@@ -439,6 +432,80 @@ async def get_prometheus_metrics(
             "metrics": {},
             "key_metrics": {}
         }
+
+
+# ---------------------------------------------------------------------------
+# Force Refresh — Sprint 10.5 (The Panic Button)
+# ---------------------------------------------------------------------------
+
+async def _run_analysis_for_ticker(ticker: str, company_type: str) -> None:
+    """Background task: re-analyse a single ticker after data purge."""
+    try:
+        from engines.nexus_engine import NexusEngine
+        engine = NexusEngine()
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if company_type == "CONSUMER":
+            await engine.analyze_manufacturer(ticker)
+        else:
+            await engine.analyze_miner(ticker)
+        logger.info(f"Force Refresh: analysis complete for {ticker}")
+    except Exception as exc:
+        logger.error(f"Force Refresh background task failed for {ticker}: {exc}")
+
+
+@router.post("/nodes/{ticker}/force-refresh", response_model=Dict[str, Any])
+@limiter.limit("5/minute")
+async def force_refresh_node(
+    request: Request,
+    ticker: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_admin_user),
+) -> Dict[str, Any]:
+    """
+    Panic Button — purge stale extracted_data for a node and re-queue a
+    fresh Nexus Engine analysis.  Returns immediately; analysis runs async.
+    """
+    ticker = ticker.upper()
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT asset_ticker, company_type FROM supply_chain_nodes WHERE asset_ticker = %s",
+                (ticker,),
+            )
+            node = cur.fetchone()
+            if not node:
+                raise HTTPException(status_code=404, detail=f"Node {ticker} not found")
+
+            cur.execute(
+                """
+                UPDATE supply_chain_nodes
+                   SET extracted_data   = '{}',
+                       last_scanned_at  = NOW() - INTERVAL '10 years'
+                 WHERE asset_ticker = %s
+                """,
+                (ticker,),
+            )
+            conn.commit()
+        logger.info(f"Force Refresh: data purged for {ticker}, queuing background analysis")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"Force Refresh purge failed for {ticker}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to purge node data")
+    finally:
+        release_db_connection(conn)
+
+    company_type = node["company_type"] if node else "PRODUCER"
+    background_tasks.add_task(_run_analysis_for_ticker, ticker, company_type)
+
+    return {
+        "status": "queued",
+        "ticker": ticker,
+        "message": f"Data purged and refresh triggered for {ticker}",
+    }
 
 
 __all__ = ["router"]

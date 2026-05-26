@@ -20,7 +20,7 @@ from models.finance import CompanyFinancials, AssetScore
 from ml.ollama_client import OllamaClient
 from utils.fmp_client import fetch_fmp_fundamentals, format_fmp_for_prompt
 from engines.technical import TechnicalAnalyzer, default_technical_analyzer
-from engines.rag_engine import RAGEngine
+from engines.rag_engine import RAGEngine, get_rag_engine
 from notifications.telegram import send_telegram_alert
 from notifications.discord import send_discord_alert
 
@@ -72,7 +72,7 @@ class SLMOrchestrator:
         self.debate_log: List[DebateStep] = []
         self.technical_analyzer = TechnicalAnalyzer()
         self.market_api_base = "http://localhost:8000"  # Default to local backend
-        self.rag_engine = RAGEngine(ollama_client)  # Phase 12: RAG engine for historical context
+        self.rag_engine = get_rag_engine()  # Phase 12: Singleton RAG engine (Sprint 5.1)
     
     async def _fetch_technical_analysis(self, ticker: str) -> Dict[str, Any]:
         """Fetch technical analysis data for a ticker"""
@@ -149,10 +149,9 @@ class SLMOrchestrator:
                 with conn.cursor() as cur:
                     # Get active alert configs
                     cur.execute("""
-                        SELECT config_id, min_confidence_threshold, signal_types,
-                               telegram_chat_id, discord_webhook_url
+                        SELECT id AS config_id, confidence_threshold AS min_confidence_threshold,
+                               notification_preferences
                         FROM alert_configs
-                        WHERE is_active = TRUE
                     """)
                     configs = cur.fetchall()
                     
@@ -181,22 +180,25 @@ Recommendation: {recommendation}{hive_info}
 This alert was triggered because the signal met your configured threshold.
 """
                         
+                        prefs = config.get("notification_preferences") or {}
                         # Send Telegram alert
-                        if config.get("telegram_chat_id"):
+                        tg_chat_id = prefs.get("telegram_chat_id")
+                        if tg_chat_id:
                             try:
                                 await send_telegram_alert(
-                                    chat_id=config["telegram_chat_id"],
+                                    chat_id=tg_chat_id,
                                     message=message
                                 )
                                 logger.info(f"Sent Telegram alert for {ticker}")
                             except Exception as e:
                                 logger.warning(f"Failed to send Telegram alert: {e}")
-                        
+
                         # Send Discord alert
-                        if config.get("discord_webhook_url"):
+                        discord_url = prefs.get("discord_webhook_url")
+                        if discord_url:
                             try:
                                 await send_discord_alert(
-                                    webhook_url=config["discord_webhook_url"],
+                                    webhook_url=discord_url,
                                     title=f"🚨 Alert: {ticker} - {signal_type}",
                                     description=message,
                                     signal_type=signal_type
@@ -905,3 +907,113 @@ Based on the above, return JSON ONLY in this exact shape (no prose outside the b
         """Get current timestamp in ISO 8601 format"""
         from datetime import datetime
         return datetime.utcnow().isoformat()
+
+    async def extract_geopolitical_risk(self, ticker: str) -> Dict[str, Any]:
+        """
+        Phase 16.0: Supply Chain Cartographer
+        
+        Searches document_chunks for supply chain context and uses Claude 3.5 Sonnet
+        to extract geopolitical risks, then persists to supply_chain_nodes table.
+        
+        Args:
+            ticker: Asset ticker symbol
+            
+        Returns:
+            Dict with extracted risk data
+        """
+        from ml.claude_client import ClaudeClient
+        from utils.database import get_db_connection
+
+        logger.info(f"Phase 16.0: Extracting geopolitical risk for {ticker}")
+
+        # Search document_chunks with supply chain queries
+        search_queries = [
+            "supply chain tier 1 suppliers",
+            "tariffs import export restrictions",
+            "raw materials sourcing critical minerals",
+            "geopolitical risk country dependency",
+        ]
+
+        combined_context = []
+        for query in search_queries:
+            try:
+                chunks = await self.rag_engine.search_chunks(query, ticker, limit=3)
+                for chunk in chunks:
+                    combined_context.append(chunk.get("content_text", ""))
+            except Exception as e:
+                logger.warning(f"RAG search failed for query '{query}': {e}")
+
+        if not combined_context:
+            logger.warning(f"No supply chain context found for {ticker}")
+            return {"ticker": ticker, "status": "no_data"}
+
+        context_text = "\n\n".join(combined_context)[:8000]  # Cap to avoid token overflow
+
+        # Claude 3.5 Sonnet extraction prompt
+        prompt = f"""SYSTEM: FORENSIC SUPPLY CHAIN ANALYST
+
+Analyze the following text from company documents for ticker {ticker}.
+Extract geopolitical supply chain risks and output ONLY valid JSON, no prose:
+
+{{
+  "primary_risk_country": "Most risky single country in the supply chain (e.g. China, Russia)",
+  "dependency_percentage": 0.0,
+  "named_suppliers": ["Company names of raw material suppliers"],
+  "single_source_risks": [{{"material": "Neon", "country": "China"}}],
+  "tariff_exposure": ["Quotes about tariff or trade restriction risks"],
+  "raw_material_vulnerabilities": ["Critical materials at risk of supply disruption"]
+}}
+
+If a field cannot be determined, use null or empty array.
+
+DOCUMENT TEXT:
+{context_text}"""
+
+        try:
+            claude = ClaudeClient()
+            if not claude.is_available():
+                logger.warning("Claude not available for geopolitical risk extraction")
+                return {"ticker": ticker, "status": "claude_unavailable"}
+
+            response = await claude.generate(prompt)
+            raw_text = response.get("text", "")
+
+            # Extract JSON from response
+            import json
+            json_start = raw_text.find("{")
+            json_end = raw_text.rfind("}") + 1
+            if json_start == -1 or json_end == 0:
+                raise ValueError("No JSON found in Claude response")
+
+            extracted = json.loads(raw_text[json_start:json_end])
+
+            # Persist to supply_chain_nodes
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO supply_chain_nodes
+                            (asset_ticker, primary_risk_country, dependency_percentage, extracted_metadata, updated_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (asset_ticker)
+                        DO UPDATE SET
+                            primary_risk_country = EXCLUDED.primary_risk_country,
+                            dependency_percentage = EXCLUDED.dependency_percentage,
+                            extracted_metadata = EXCLUDED.extracted_metadata,
+                            updated_at = NOW()
+                    """, (
+                        ticker,
+                        extracted.get("primary_risk_country"),
+                        extracted.get("dependency_percentage"),
+                        json.dumps(extracted),
+                    ))
+                    conn.commit()
+                logger.info(f"Persisted geopolitical risk for {ticker}")
+            finally:
+                conn.close()
+
+            return {"ticker": ticker, "status": "success", "data": extracted}
+
+        except Exception as e:
+            logger.error(f"Geopolitical risk extraction failed for {ticker}: {e}")
+            return {"ticker": ticker, "status": "error", "error": str(e)}
