@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from psycopg2.extras import RealDictCursor
 
+from config import settings
 from schemas.omniscient import BuyoutPrediction
 from utils.database import get_db_connection, release_db_connection
 from utils.fmp_client import fetch_fmp_fundamentals, format_fmp_for_prompt
@@ -37,7 +38,7 @@ from utils.fmp_client import fetch_fmp_fundamentals, format_fmp_for_prompt
 DILUTION_RISK_HIGH_THRESHOLD: float = 70.0
 SCORE_HIGH_DILUTION_WITH_TOP: float = 85.0
 SCORE_HIGH_DILUTION_NO_TOP: float = 45.0
-SMALL_CAP_THRESHOLD_USD: float = float(os.getenv("MA_SMALL_CAP_THRESHOLD_USD", "500_000_000"))  # $500M
+SMALL_CAP_THRESHOLD_USD: float = settings.MA_SMALL_CAP_THRESHOLD_USD  # default $500M
 
 _MA_PROMPT = """SYSTEM INSTRUCTION: SOVEREIGN M&A PROBABILITY ASSESSOR
 
@@ -102,7 +103,7 @@ async def evaluate_buyout_probability(
         for e in top_edges[:5]
     ) or "None"
 
-    use_live = os.getenv("USE_MOCK_DATA", "false").lower() != "true"
+    use_live = not settings.USE_MOCK_DATA
     fmp_data = await _load_fmp_data(ticker) if use_live else {}
     fmp_block = format_fmp_for_prompt(fmp_data) if fmp_data else "[FMP unavailable in mock mode]"
 

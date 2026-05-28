@@ -22,11 +22,11 @@ USE_MOCK_DATA=false → _fetch_live_signals() placeholder (Phase 3+)
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from config import settings
 from schemas.omniscient import SentimentEarlyWarning
 from utils.database import get_db_connection, release_db_connection
 
@@ -34,9 +34,7 @@ from utils.database import get_db_connection, release_db_connection
 # Config
 # ---------------------------------------------------------------------------
 
-EARLY_WARNING_THRESHOLD: float = float(
-    os.getenv("SENTIMENT_EARLY_WARNING_THRESHOLD", "-0.50")
-)
+EARLY_WARNING_THRESHOLD: float = settings.SENTIMENT_EARLY_WARNING_THRESHOLD
 
 # ---------------------------------------------------------------------------
 # Keyword sets (for future live RSS scoring)
@@ -65,15 +63,7 @@ REGION_KEYWORDS = frozenset([
 # Public RSS feeds covering mining / commodity regions (no auth required)
 MINING_RSS_FEEDS: List[str] = [
     url.strip()
-    for url in os.getenv(
-        "SENTIMENT_RSS_FEEDS",
-        ",".join([
-            "https://www.mining.com/feed/",
-            "https://stocknews.com/news/category/mining/feed/",
-            "https://feeds.reuters.com/reuters/businessNews",
-            "https://www.infomine.com/rss/mining-news.xml",
-        ]),
-    ).split(",")
+    for url in settings.SENTIMENT_RSS_FEEDS.split(",")
     if url.strip()
 ]
 
@@ -162,7 +152,7 @@ async def run_sentiment_crawl(
     from api.settings import dispatch_risk_alert
 
     if use_mock is None:
-        use_mock = os.getenv("USE_MOCK_DATA", "false").lower() == "true"
+        use_mock = settings.USE_MOCK_DATA
 
     raw_signals: List[Dict[str, Any]] = (
         _MOCK_SIGNALS if use_mock else await _fetch_live_signals()

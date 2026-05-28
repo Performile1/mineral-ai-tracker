@@ -82,9 +82,24 @@ class Settings(BaseSettings):
     # PRD v13.2 Phase 13.2: Multi-Model Selector (Gemini Integration)
     GEMINI_API_KEY: Optional[str] = None
     
+    # Phase 15.0: Claude 3.5 Sonnet Integration
+    ANTHROPIC_API_KEY: Optional[str] = None
+
+    # Sprint 17 — Live Wire agents
+    USE_MOCK_DATA: bool = False
+    MA_SMALL_CAP_THRESHOLD_USD: float = 500_000_000.0
+    SENTIMENT_EARLY_WARNING_THRESHOLD: float = -0.50
+    SENTIMENT_RSS_FEEDS: str = ",".join([
+        "https://www.mining.com/feed/",
+        "https://stocknews.com/news/category/mining/feed/",
+        "https://feeds.reuters.com/reuters/businessNews",
+        "https://www.infomine.com/rss/mining-news.xml",
+    ])
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"  # Allow extra environment variables (e.g., NEXTAUTH_SECRET from Docker compose)
 
 
 settings = Settings()
