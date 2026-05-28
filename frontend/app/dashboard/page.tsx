@@ -14,6 +14,7 @@ import IntelligenceCard, {
 import ShadowPortfolio from "@/components/ShadowPortfolio";
 import WatchlistStalker from "@/components/WatchlistStalker";
 import SecondarySupplyChart from "@/components/SecondarySupplyChart";
+import HiveMindPulse from "@/components/HiveMindPulse";
 
 // ---------------------------------------------------------------------------
 // Types for dashboard summary
@@ -77,7 +78,7 @@ function GodModePanel({ summary }: { summary: DashboardSummary }) {
         <span className="ml-auto text-[10px] text-muted">Sprint 17 · live data</span>
       </div>
 
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
 
         {/* Top M&A Targets */}
         <div className="bg-surface border border-amber-600/40 rounded-xl p-4 shadow-sm">
@@ -189,6 +190,11 @@ function GodModePanel({ summary }: { summary: DashboardSummary }) {
               ))}
             </ul>
           )}
+        </div>
+
+        {/* Hive Mind Pulse — 5th card, aubergine palette */}
+        <div className="sm:col-span-2 xl:col-span-1">
+          <HiveMindPulse />
         </div>
 
         {/* Chokepoint Alerts */}

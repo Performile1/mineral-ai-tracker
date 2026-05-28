@@ -157,6 +157,9 @@ async def _start_automation() -> None:
     try:
         # Phase 2.1: Warm the shared DB connection pool
         get_connection_pool()
+        # Sprint 22: create hive_signals table if it does not exist
+        from api.hive import ensure_hive_signals_table
+        ensure_hive_signals_table()
         start_scheduler()
         # PRD v10.0 Phase 11: Expose Prometheus metrics on startup
         instrumentator.expose(app, include_in_schema=False, should_gzip=True)
