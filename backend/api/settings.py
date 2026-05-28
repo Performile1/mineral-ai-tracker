@@ -4,11 +4,15 @@ Version: 8.0
 Description: API endpoint for system settings and thresholds
 """
 
+import json
+from datetime import datetime, timezone
+
+import httpx
 from fastapi import APIRouter, HTTPException, Depends
 
 from api.deps import get_current_user
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Dict, Optional
 import os
 from loguru import logger
 
@@ -16,6 +20,8 @@ from loguru import logger
 from models.finance import SystemSettings
 from config import settings
 from utils.vault import encrypt, decrypt, CRYPTO_AVAILABLE
+from utils.database import get_db_connection, release_db_connection
+from psycopg2.extras import RealDictCursor
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -64,21 +70,6 @@ class SettingsResponse(BaseModel):
 # Database Helper Functions
 # ============================================================================
 
-def get_db_connection():
-    """Get database connection"""
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    
-    # Use keyword parameters to avoid DSN parsing issues
-    return psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="mineral_ai_tracker",
-        user="mineral_user",
-        password="mineralpass123",
-        cursor_factory=RealDictCursor
-    )
-
 
 def load_settings_from_db() -> Optional[SystemSettings]:
     """Load settings from database (including vault keys if present)"""
@@ -110,7 +101,7 @@ def load_settings_from_db() -> Optional[SystemSettings]:
                     return SystemSettings(**result)
                 return None
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.warning(f"Failed to load settings from DB: {e}")
         return None
@@ -231,7 +222,7 @@ def save_settings_to_db(settings_obj: SystemSettings) -> bool:
                 conn.commit()
                 return True
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.error(f"Failed to save settings to DB: {e}")
         return False
@@ -452,3 +443,387 @@ async def update_vault(
     except Exception as e:
         logger.error(f"Error updating vault: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Notification Routing — Sprint 10.8
+# ---------------------------------------------------------------------------
+
+_DEFAULT_NOTIFICATION_PREFS: Dict[str, Any] = {
+    "dilution_risk":   {"email": True,  "in_app": True,  "webhook": False},
+    "black_swan":      {"email": False, "in_app": True,  "webhook": False},
+    "take_or_pay_new": {"email": False, "in_app": True,  "webhook": False},
+}
+
+
+class NotificationPreferences(BaseModel):
+    dilution_risk:   Optional[Dict[str, bool]] = None
+    black_swan:      Optional[Dict[str, bool]] = None
+    take_or_pay_new: Optional[Dict[str, bool]] = None
+
+
+def _ensure_alert_config_row(user_id: str) -> None:
+    """Create an alert_configs row with defaults if one does not exist yet."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO alert_configs (user_id, notification_preferences)
+                VALUES (%s, %s::JSONB)
+                ON CONFLICT (user_id) DO NOTHING
+                """,
+                (user_id, json.dumps(_DEFAULT_NOTIFICATION_PREFS)),
+            )
+            conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        release_db_connection(conn)
+
+
+@router.get("/notifications", response_model=Dict[str, Any])
+async def get_notification_preferences(
+    current_user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Return the current user's notification routing preferences."""
+    user_id = current_user.get("sub") or current_user.get("id", "default")
+    _ensure_alert_config_row(user_id)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT notification_preferences FROM alert_configs WHERE user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            prefs = row["notification_preferences"] if row else _DEFAULT_NOTIFICATION_PREFS
+            if isinstance(prefs, str):
+                prefs = json.loads(prefs)
+            return prefs
+    except Exception as exc:
+        logger.error(f"get_notification_preferences failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load preferences")
+    finally:
+        release_db_connection(conn)
+
+
+@router.put("/notifications", response_model=Dict[str, Any])
+async def update_notification_preferences(
+    body: NotificationPreferences,
+    current_user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Merge-update the notification routing preferences (only supplied keys overwritten)."""
+    user_id = current_user.get("sub") or current_user.get("id", "default")
+    _ensure_alert_config_row(user_id)
+
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No preferences supplied")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # JSONB merge: existing || new (PostgreSQL 9.5+)
+            cur.execute(
+                """
+                UPDATE alert_configs
+                   SET notification_preferences = notification_preferences || %s::JSONB
+                 WHERE user_id = %s
+                RETURNING notification_preferences
+                """,
+                (json.dumps(updates), user_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            prefs = row["notification_preferences"] if row else updates
+            if isinstance(prefs, str):
+                prefs = json.loads(prefs)
+            return prefs
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"update_notification_preferences failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to update preferences")
+    finally:
+        release_db_connection(conn)
+
+
+async def dispatch_risk_alert(
+    ticker: str,
+    score: float,
+    category: str = "dilution_risk",
+    user_id: str | None = None,
+) -> None:
+    """
+    Sprint 13 — Alert Subscription Engine.
+
+    Broadcasts to ALL users who have subscribed to `ticker` in `user_alerts`
+    with `risk_threshold <= score`.  Reads each user's `notification_preferences`
+    and routes to the enabled channels.
+
+    `user_id` is kept as an optional parameter for backward-compat; when omitted
+    the function queries `user_alerts` and dispatches to all matching subscribers.
+    When supplied it broadcasts only to that single user (direct call path).
+    """
+    # -- 1. Resolve the list of target users ---------------------------------
+    subscribers: list[dict] = []
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if user_id:
+                # Backward-compat: single-user direct call
+                cur.execute(
+                    "SELECT %s::VARCHAR AS user_id, 0 AS risk_threshold",
+                    (user_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT user_id, risk_threshold
+                      FROM user_alerts
+                     WHERE ticker = %s
+                       AND risk_threshold <= %s
+                    """,
+                    (ticker, int(score)),
+                )
+            subscribers = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        logger.warning(f"dispatch_risk_alert: failed to query user_alerts for {ticker}: {exc}")
+    finally:
+        release_db_connection(conn)
+
+    if not subscribers:
+        logger.debug(f"dispatch_risk_alert [{ticker}] score={score:.0f} — no matching subscribers")
+        return
+
+    logger.info(
+        f"dispatch_risk_alert [{ticker}] score={score:.0f} "
+        f"— dispatching to {len(subscribers)} subscriber(s)"
+    )
+
+    # -- 2. Dispatch per subscriber ------------------------------------------
+    for sub in subscribers:
+        await _dispatch_to_user(ticker, score, sub["user_id"], category)
+
+
+_WEBHOOK_TIMEOUT = 5.0
+
+_CATEGORY_MSG: dict[str, str] = {
+    "dilution_risk":   "Dilution Risk: {score:.0f}% (threshold exceeded)",
+    "ma_radar":        "M&A Target Score: {score:.0f}% — potential buyout candidate",
+    "chokepoint":      "Chokepoint Friction: {score:.0f}% geopolitical cost spike",
+    "early_sentiment": "Labor Unrest Signal: confidence {score:.0f}%",
+}
+
+
+async def _send_webhook(
+    webhook_url: str,
+    alert_type: str,
+    ticker: str,
+    score: float,
+    message: str,
+) -> None:
+    """POST a structured JSON alert to a user-configured generic webhook.
+
+    Compatible with Slack incoming webhooks, n8n, Make, Zapier, Teams,
+    or any HTTP POST endpoint. A broken webhook NEVER raises — it only logs.
+    """
+    payload = {
+        "app": "Mineral AI Tracker",
+        "alert_type": alert_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "message": message,
+        "meta": {
+            "ticker": ticker,
+            "score": round(score, 2),
+            "alert_type": alert_type,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT) as client:
+            resp = await client.post(webhook_url, json=payload)
+            resp.raise_for_status()
+            logger.info(
+                f"_send_webhook [{alert_type}/{ticker}] → {webhook_url} [{resp.status_code}]"
+            )
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            f"_send_webhook HTTP {exc.response.status_code} for {ticker}/{alert_type} "
+            f"at {webhook_url}: {exc}"
+        )
+    except httpx.RequestError as exc:
+        logger.error(
+            f"_send_webhook request error for {ticker}/{alert_type} at {webhook_url}: {exc}"
+        )
+
+
+async def _dispatch_to_user(
+    ticker: str,
+    score: float,
+    user_id: str,
+    category: str,
+) -> None:
+    """Load one user's notification_preferences and route the alert."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT notification_preferences FROM alert_configs WHERE user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            prefs_raw = row["notification_preferences"] if row else _DEFAULT_NOTIFICATION_PREFS
+            prefs = prefs_raw if isinstance(prefs_raw, dict) else json.loads(prefs_raw)
+    except Exception as exc:
+        logger.warning(f"_dispatch_to_user: failed to load prefs for {user_id}: {exc}")
+        prefs = _DEFAULT_NOTIFICATION_PREFS
+    finally:
+        release_db_connection(conn)
+
+    channel_cfg = prefs.get(category, {"email": False, "in_app": True, "webhook": False})
+    message = "⚠️ {} — ".format(ticker) + _CATEGORY_MSG.get(
+        category, "Alert score: {score:.0f}%"
+    ).format(score=score)
+    logger.info(f"_dispatch_to_user [{ticker}→{user_id}] channels={channel_cfg}")
+
+    if channel_cfg.get("in_app"):
+        _save_in_app_alert(ticker, score, message)
+
+    if channel_cfg.get("email"):
+        try:
+            from notifications.email import send_email_alert
+            await send_email_alert(subject=f"Mineral AI: {message}", body=message)
+        except Exception as exc:
+            logger.warning(f"Email dispatch failed for {ticker}/{user_id}: {exc}")
+
+    if channel_cfg.get("webhook"):
+        webhook_url = prefs.get("webhook_url", "").strip()
+        if webhook_url:
+            await _send_webhook(
+                webhook_url=webhook_url,
+                alert_type=category,
+                ticker=ticker,
+                score=score,
+                message=message,
+            )
+        else:
+            logger.debug(
+                f"Webhook enabled for {ticker}/{user_id} but no webhook_url in notification_preferences"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Alert Subscriptions CRUD \u2014 Sprint 13 (Q2)
+# ---------------------------------------------------------------------------
+
+class AlertSubscriptionBody(BaseModel):
+    ticker: str
+    risk_threshold: int = 75
+
+
+@router.get("/alerts/subscriptions", response_model=list)
+async def list_alert_subscriptions(
+    current_user: dict = Depends(get_current_user),
+) -> list:
+    """List all ticker subscriptions for the current user."""
+    user_id = current_user.get("sub") or current_user.get("id", "default")
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, ticker, risk_threshold, created_at FROM user_alerts WHERE user_id = %s ORDER BY created_at DESC",
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": str(r["id"]),
+                    "ticker": r["ticker"],
+                    "risk_threshold": r["risk_threshold"],
+                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.error(f"list_alert_subscriptions failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load subscriptions")
+    finally:
+        release_db_connection(conn)
+
+
+@router.post("/alerts/subscriptions", response_model=dict, status_code=201)
+async def upsert_alert_subscription(
+    body: AlertSubscriptionBody,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Create or update an alert subscription for a ticker."""
+    user_id = current_user.get("sub") or current_user.get("id", "default")
+    ticker = body.ticker.upper()
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO user_alerts (user_id, ticker, risk_threshold)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, ticker)
+                DO UPDATE SET risk_threshold = EXCLUDED.risk_threshold,
+                              updated_at = NOW()
+                RETURNING id, ticker, risk_threshold
+                """,
+                (user_id, ticker, body.risk_threshold),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return {"id": str(row["id"]), "ticker": row["ticker"], "risk_threshold": row["risk_threshold"]}
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"upsert_alert_subscription failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to save subscription")
+    finally:
+        release_db_connection(conn)
+
+
+@router.delete("/alerts/subscriptions/{ticker}", status_code=204)
+async def delete_alert_subscription(
+    ticker: str,
+    current_user: dict = Depends(get_current_user),
+) -> None:
+    """Remove an alert subscription for a ticker."""
+    user_id = current_user.get("sub") or current_user.get("id", "default")
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM user_alerts WHERE user_id = %s AND ticker = %s",
+                (user_id, ticker.upper()),
+            )
+            conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"delete_alert_subscription failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to delete subscription")
+    finally:
+        release_db_connection(conn)
+
+
+def _save_in_app_alert(ticker: str, score: float, message: str) -> None:
+    """Persist in-app alert to the alerts table."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO alerts (ticker, alert_type, message, triggered_at)
+                VALUES (%s, 'DILUTION_RISK', %s, NOW())
+                ON CONFLICT DO NOTHING
+                """,
+                (ticker, message),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning(f"_save_in_app_alert failed for {ticker}: {exc}")
+        conn.rollback()
+    finally:
+        release_db_connection(conn)
