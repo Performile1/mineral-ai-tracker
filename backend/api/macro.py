@@ -8,15 +8,50 @@ Description: GET /api/macro/pulse - aggregates DXY, US10Y, and the top 3
 """
 
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, date
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import APIRouter, Depends
 from loguru import logger
 
 from config import settings
 from api.deps import get_current_user
+from utils.database import get_db_connection, release_db_connection
+
+# ---------------------------------------------------------------------------
+# Secondary Supply helpers
+# ---------------------------------------------------------------------------
+
+COPPER_SCRAP_SPREAD_FLOOR: float = 0.10  # $/lb — smelter profitability cliff
+
+
+def _seed_mock_spread_series() -> List[Dict[str, Any]]:
+    """
+    Generate a 30-day synthetic trend when the DB has no historical data.
+    Copper Scrap: healthy spread ($0.35/lb) deteriorating to a squeeze ($0.08).
+    Black Mass Index: wide spread, stable (EV recycling still expensive).
+    """
+    today = date.today()
+    rows: List[Dict[str, Any]] = []
+    for i in range(30):
+        day = today - timedelta(days=29 - i)
+        # Copper Scrap: linear decay from 0.35 → 0.08 over 30 days
+        copper_spread = round(0.35 - (0.27 / 29) * i, 4)
+        rows.append({
+            "date": day.isoformat(),
+            "material_name": "Copper Scrap",
+            "price_spread_usd": copper_spread,
+            "is_critical_squeeze": copper_spread < COPPER_SCRAP_SPREAD_FLOOR,
+        })
+        # Black Mass: mild random walk around $5.40, no squeeze
+        bm_spread = round(5.60 - (0.20 / 29) * i, 4)
+        rows.append({
+            "date": day.isoformat(),
+            "material_name": "Black Mass Index",
+            "price_spread_usd": bm_spread,
+            "is_critical_squeeze": False,
+        })
+    return rows
 
 router = APIRouter(prefix="/api/macro", tags=["macro"])
 
@@ -39,16 +74,6 @@ FALLBACK_VALUES: Dict[str, Dict[str, Any]] = {
     "uranium_deficit":  {"value": -22,   "delta_pct": 0.9},
 }
 
-
-def _get_db_connection():
-    return psycopg2.connect(
-        host=settings.POSTGRES_HOST,
-        port=settings.POSTGRES_PORT,
-        dbname=settings.POSTGRES_DB,
-        user=settings.POSTGRES_USER,
-        password=settings.POSTGRES_PASSWORD,
-        cursor_factory=RealDictCursor,
-    )
 
 
 def _latest_two_values(cur, indicator_key: str) -> Optional[Dict[str, float]]:
@@ -93,9 +118,9 @@ async def get_pulse(current_user: dict = Depends(get_current_user)) -> Dict[str,
     using_fallback = True
 
     try:
-        conn = _get_db_connection()
+        conn = get_db_connection()
         try:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 for key, label, unit, hint in PULSE_KEYS:
                     snap = _latest_two_values(cur, key)
                     if snap is None:
@@ -111,7 +136,7 @@ async def get_pulse(current_user: dict = Depends(get_current_user)) -> Dict[str,
                             "value": snap["value"], "delta_pct": snap["delta_pct"],
                         })
         finally:
-            conn.close()
+            release_db_connection(conn)
     except Exception as e:
         logger.warning(f"/api/macro/pulse fallback (DB unavailable): {e}")
         for key, label, unit, hint in PULSE_KEYS:
@@ -125,4 +150,78 @@ async def get_pulse(current_user: dict = Depends(get_current_user)) -> Dict[str,
         "metrics": metrics,
         "as_of": datetime.utcnow().isoformat() + "Z",
         "source": "fallback" if using_fallback else "db",
+    }
+
+
+@router.get("/secondary-supply")
+async def get_secondary_supply(
+    current_user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Sprint 21 — Secondary Supply Pressure time series.
+
+    Returns up to 30 days of spread data per material.
+    Falls back to a seeded 30-day synthetic trend when the DB table is empty
+    (fresh install / scheduler not yet run), so the chart is always useful.
+
+    Response shape:
+      {
+        "items": [
+          {
+            "date": "2026-05-28",
+            "material_name": "Copper Scrap",
+            "price_spread_usd": 0.12,
+            "is_critical_squeeze": false
+          },
+          ...
+        ],
+        "spread_floor_usd": 0.10,
+        "source": "db" | "mock"
+      }
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date()
+
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        DATE(updated_at)              AS date,
+                        material_name,
+                        primary_secondary_spread      AS price_spread_usd
+                    FROM secondary_supply
+                    WHERE updated_at >= %s
+                    ORDER BY updated_at ASC
+                    """,
+                    (cutoff,),
+                )
+                db_rows = cur.fetchall()
+        finally:
+            release_db_connection(conn)
+
+        if db_rows:
+            items = [
+                {
+                    "date": str(row["date"]),
+                    "material_name": row["material_name"],
+                    "price_spread_usd": float(row["price_spread_usd"]) if row["price_spread_usd"] is not None else None,
+                    "is_critical_squeeze": (
+                        row["material_name"] == "Copper Scrap"
+                        and row["price_spread_usd"] is not None
+                        and float(row["price_spread_usd"]) < COPPER_SCRAP_SPREAD_FLOOR
+                    ),
+                }
+                for row in db_rows
+            ]
+            return {"items": items, "spread_floor_usd": COPPER_SCRAP_SPREAD_FLOOR, "source": "db"}
+
+    except Exception as exc:
+        logger.warning(f"/api/macro/secondary-supply DB error, using mock: {exc}")
+
+    return {
+        "items": _seed_mock_spread_series(),
+        "spread_floor_usd": COPPER_SCRAP_SPREAD_FLOOR,
+        "source": "mock",
     }

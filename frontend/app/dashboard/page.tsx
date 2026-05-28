@@ -13,6 +13,7 @@ import IntelligenceCard, {
 } from "@/components/IntelligenceCard";
 import ShadowPortfolio from "@/components/ShadowPortfolio";
 import WatchlistStalker from "@/components/WatchlistStalker";
+import SecondarySupplyChart from "@/components/SecondarySupplyChart";
 
 // ---------------------------------------------------------------------------
 // Types for dashboard summary
@@ -354,6 +355,11 @@ export default function DashboardPage() {
         <div className="lg:col-span-3 lg:row-span-2 flex flex-col gap-4">
           <MacroDeficitRadar />
           <RiskCorrelationMatrix />
+        </div>
+
+        {/* Row 4: Secondary Supply Pressure — full width */}
+        <div className="lg:col-span-12">
+          <SecondarySupplyChart />
         </div>
       </div>
     </main>

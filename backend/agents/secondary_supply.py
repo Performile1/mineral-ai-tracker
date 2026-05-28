@@ -19,22 +19,20 @@ Provider pattern (mirrors quant_watchdog.py):
 from __future__ import annotations
 
 import json
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from psycopg2.extras import RealDictCursor
 
+from config import settings
 from utils.database import get_db_connection, release_db_connection
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-COPPER_SCRAP_SPREAD_FLOOR: float = float(
-    os.getenv("COPPER_SCRAP_SPREAD_FLOOR_USD_LB", "0.10")
-)
+COPPER_SCRAP_SPREAD_FLOOR: float = 0.10  # $/lb — overrideable via settings if needed
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +108,7 @@ class LiveSecondarySupplyProvider(BaseSecondarySupplyProvider):
 
 
 def get_secondary_supply_provider() -> BaseSecondarySupplyProvider:
-    if os.getenv("USE_MOCK_DATA", "false").lower() == "true":
+    if settings.USE_MOCK_DATA:
         return MockSecondarySupplyProvider()
     return LiveSecondarySupplyProvider()
 
